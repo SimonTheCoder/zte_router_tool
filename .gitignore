@@ -17,3 +17,4 @@ dumps/
 
 # Log files
 *.log
+/zte_router_tool_private
