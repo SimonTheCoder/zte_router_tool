@@ -51,18 +51,37 @@ class ZTERouter:
         data = response.json()
         
         if data.get("sess_token"):
-            self.session_token = data.get("sess_token")
+            # Use X_XSRF_TOKEN from response headers if available (server-provided session token)
+            # otherwise fall back to sess_token from response body
+            self.session_token = response.headers.get("X_XSRF_TOKEN") or data.get("sess_token")
             logger.info("Login successful")
             return True
         else:
             logger.error(f"Login failed: {data}")
             return False
 
+    def _refresh_token(self):
+        """Fetch a fresh XSRF token by GETting the target page (mirrors browser behavior)."""
+        url = f"{self.base_url}/?_type=vueData&_tag=home_internetreg_lua"
+        headers = {"Referer": f"{self.base_url}/"}
+        response = self.session.get(url, headers=headers)
+        response.raise_for_status()
+        new_token = response.headers.get("X_XSRF_TOKEN")
+        if new_token:
+            self.session_token = new_token
+            logger.debug(f"Token refreshed: {new_token}")
+        return new_token is not None
+
     def redial(self):
         """Step C: Reconnect Command (POST)"""
         if not self.session_token:
             if not self.login():
                 return False
+
+        # Refresh token before redial — the login token is stale for page actions
+        if not self._refresh_token():
+            logger.error("Failed to refresh session token before redial")
+            return False
 
         url = f"{self.base_url}/?_type=vueData&_tag=home_internetreg_lua"
         headers = {
@@ -78,15 +97,17 @@ class ZTERouter:
         response = self.session.post(url, headers=headers, data=payload)
         response.raise_for_status()
         
+        # Update session token from X_XSRF_TOKEN header for subsequent requests
+        xsrf_token = response.headers.get("X_XSRF_TOKEN")
+        if xsrf_token:
+            self.session_token = xsrf_token
+        
         # The response is XML
         try:
             root = ET.fromstring(response.text)
             error_str = root.find("IF_ERRORSTR").text
             if error_str == "SUCC":
                 logger.info("Redial command sent successfully")
-                # Update session token from X_XSRF_TOKEN header if available
-                if "X_XSRF_TOKEN" in response.headers:
-                    self.session_token = response.headers["X_XSRF_TOKEN"]
                 return True
             else:
                 logger.error(f"Redial failed: {error_str}")
